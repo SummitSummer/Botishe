@@ -1,0 +1,22 @@
+{
+  "name": "blesk-spotify-bot",
+  "version": "1.0.0",
+  "description": "Telegram bot for selling Spotify subscription slots",
+  "main": "bot.js",
+  "scripts": {
+    "start": "node bot.js"
+  },
+  "keywords": [
+    "telegram",
+    "bot",
+    "spotify"
+  ],
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "axios": "^1.12.2",
+    "dotenv": "^16.6.1",
+    "express": "^4.21.2",
+    "node-telegram-bot-api": "^0.66.0"
+  }
+}
