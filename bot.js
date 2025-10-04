@@ -120,21 +120,23 @@ bot.on('callback_query', async (query) => {
     try {
       bot.sendMessage(chatId, '⏳ Создаю ссылку на оплату...');
 
-      const webhookUrl = `https://${process.env.REPL_SLUG}.${process.env.REPL_OWNER}.repl.co/webhook/platega`;
+      const crypto = require('crypto');
+      const transactionId = crypto.randomUUID();
       
       const paymentData = {
-        shop_id: PLATEGA_SHOP_ID,
-        amount: 169,
-        currency: 'RUB',
-        order_id: `order_${chatId}_${Date.now()}`,
+        id: transactionId,
+        paymentMethod: 10,
+        paymentDetails: {
+          amount: 169,
+          currency: 'RUB'
+        },
         description: 'Подписка Spotify - 1 месяц',
-        success_url: 'https://t.me/your_bot',
-        fail_url: 'https://t.me/your_bot',
-        webhook_url: webhookUrl,
-        custom: JSON.stringify({ chatId: chatId })
+        return: 'https://t.me/blesk_spotify_bot',
+        failedUrl: 'https://t.me/blesk_spotify_bot',
+        payload: JSON.stringify({ chatId: chatId })
       };
 
-      const response = await axios.post('https://platega.io/api/v1/payments', paymentData, {
+      const response = await axios.post('https://app.platega.io/transaction/process', paymentData, {
         headers: {
           'X-MerchantId': PLATEGA_SHOP_ID,
           'X-Secret': PLATEGA_API_KEY,
@@ -142,15 +144,15 @@ bot.on('callback_query', async (query) => {
         }
       });
 
-      if (response.data && response.data.payment_url) {
+      if (response.data && response.data.redirect) {
         const keyboard = {
           inline_keyboard: [
-            [{ text: '💳 Перейти к оплате', url: response.data.payment_url }],
+            [{ text: '💳 Перейти к оплате', url: response.data.redirect }],
             [{ text: '🔙 Назад в меню', callback_data: 'menu' }]
           ]
         };
 
-        dataStore.payments[response.data.order_id || paymentData.order_id] = {
+        dataStore.payments[transactionId] = {
           chatId: chatId,
           amount: 169,
           status: 'pending',
@@ -310,28 +312,18 @@ app.post('/webhook/platega', async (req, res) => {
       return res.status(401).json({ error: 'Unauthorized' });
     }
 
-    const { status, order_id, custom } = req.body;
+    const { status, id } = req.body;
 
     if (status === 'CONFIRMED') {
       let chatId;
 
-      if (custom) {
-        try {
-          const customData = JSON.parse(custom);
-          chatId = customData.chatId;
-        } catch (e) {
-          console.error('Ошибка парсинга custom:', e);
-        }
-      }
-
-      if (!chatId && dataStore.payments[order_id]) {
-        chatId = dataStore.payments[order_id].chatId;
+      if (dataStore.payments[id]) {
+        chatId = dataStore.payments[id].chatId;
       }
 
       if (chatId) {
-        dataStore.payments[order_id] = dataStore.payments[order_id] || {};
-        dataStore.payments[order_id].status = 'paid';
-        dataStore.payments[order_id].paidAt = Date.now();
+        dataStore.payments[id].status = 'paid';
+        dataStore.payments[id].paidAt = Date.now();
         saveData(dataStore);
 
         bot.sendMessage(chatId, '✅ *Оплата прошла успешно!*\n\n📝 Теперь введите ваш логин от аккаунта Spotify:', {
@@ -340,9 +332,13 @@ app.post('/webhook/platega', async (req, res) => {
 
         userStates[chatId] = {
           step: 'awaiting_login',
-          orderId: order_id
+          transactionId: id
         };
+      } else {
+        console.error('⚠️ Не найден chatId для транзакции:', id);
       }
+    } else if (status === 'CANCELED') {
+      console.log('Платеж отменен:', id);
     }
 
     res.status(200).json({ status: 'ok' });
