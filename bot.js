@@ -6,15 +6,19 @@ const fs = require('fs');
 const path = require('path');
 
 const BOT_TOKEN = process.env.BOT_TOKEN;
-const ADMIN_ID = process.env.ADMIN_ID;
-const PLATEGA_API_KEY = process.env.PLATEGA_API_KEY;
-const PLATEGA_SHOP_ID = process.env.PLATEGA_SHOP_ID;
+const ADMIN_ID = process.env.ADMIN_ID; // ваш Telegram ID администратора
+const PLATEGA_API_KEY = process.env.PLATEGA_API_KEY; // X-Secret
+const PLATEGA_SHOP_ID = process.env.PLATEGA_SHOP_ID; // X-MerchantId (merchant id)
 const PORT = process.env.PORT || 5000;
+
+if (!BOT_TOKEN || !ADMIN_ID || !PLATEGA_API_KEY || !PLATEGA_SHOP_ID) {
+  console.error('ERROR: Не заданы обязательные переменные окружения. Убедитесь, что BOT_TOKEN, ADMIN_ID, PLATEGA_API_KEY и PLATEGA_SHOP_ID установлены.');
+  process.exit(1);
+}
 
 const bot = new TelegramBot(BOT_TOKEN, { polling: true });
 const app = express();
-
-app.use(express.json());
+app.use(express.json({ limit: '200kb' }));
 
 const DATA_FILE = path.join(__dirname, 'data.json');
 
@@ -40,7 +44,6 @@ function saveData(data) {
 }
 
 let dataStore = loadData();
-
 const userStates = {};
 
 const IMAGES = {
@@ -84,6 +87,7 @@ function sendMainMenu(chatId) {
   }
 }
 
+/* --- Telegram handlers (unchanged, небольшие улучшения) --- */
 bot.onText(/\/start/, (msg) => {
   const chatId = msg.chat.id;
   delete userStates[chatId];
@@ -117,63 +121,84 @@ bot.on('callback_query', async (query) => {
       reply_markup: keyboard
     });
   } else if (data === 'pay') {
+    let loadingMsg;
     try {
-      const loadingMsg = await bot.sendMessage(chatId, '⏳ Создаю ссылку на оплату...');
+      loadingMsg = await bot.sendMessage(chatId, '⏳ Создаю ссылку на оплату...');
 
       const crypto = require('crypto');
-      const transactionId = crypto.randomUUID();
-      
+      const localId = crypto.randomUUID(); // наш локальный id транзакции
+
       const paymentData = {
-        id: transactionId,
+        id: localId,
         paymentMethod: 2,
         paymentDetails: {
           amount: 169,
           currency: 'RUB'
         },
-        merchantId: PLATEGA_SHOP_ID, // Добавлено для соответствия примеру документации
         description: 'Подписка Spotify - 1 месяц',
         return: 'https://t.me/blesk_spotify_bot',
         failedUrl: 'https://t.me/blesk_spotify_bot',
-        payload: JSON.stringify({ chatId: chatId })
+        payload: JSON.stringify({ chatId: chatId }),
+        merchantId: PLATEGA_SHOP_ID // дублирую merchantId в теле — на всякий случай (некоторые endpoints требуют)
       };
 
-      const response = await axios.post('https://api.platega.io/transaction/process', paymentData, { // Изменен базовый URL на api.platega.io в соответствии с документацией
+      // URL: использую официальный API endpoint (api.platega.io), но если у вас работает app.platega.io — можно поменять
+      const PLATEGA_URL = 'https://api.platega.io/transaction/process';
+
+      const response = await axios.post(PLATEGA_URL, paymentData, {
         headers: {
           'X-MerchantId': PLATEGA_SHOP_ID,
           'X-Secret': PLATEGA_API_KEY,
           'Content-Type': 'application/json'
-        }
+        },
+        timeout: 15000
       });
 
-      if (response.data && response.data.redirect) {
-        await bot.deleteMessage(chatId, loadingMsg.message_id).catch(() => {});
+      // возможные поля ответа: redirect, transactionId, transactionId в разной форме
+      const remoteTxId = response.data?.transactionId || response.data?.transaction?.transactionId || response.data?.id || null;
+      const redirectUrl = response.data?.redirect || response.data?.payformSuccessUrl || null;
 
+      // Сохраняем маппинг локального id -> chatId и also remote id если есть
+      dataStore.payments[localId] = {
+        chatId: chatId,
+        amount: 169,
+        status: 'pending',
+        created: Date.now(),
+        localId,
+        remoteId: remoteTxId || null,
+        rawCreateResponse: response.data
+      };
+
+      // если remoteId есть — сохраняем индекс для удобства поиска по нему (чтобы webhook'и с remoteId тоже мапились)
+      if (remoteTxId) {
+        dataStore.payments[remoteTxId] = dataStore.payments[localId];
+      }
+
+      saveData(dataStore);
+
+      await bot.deleteMessage(chatId, loadingMsg.message_id).catch(() => {});
+
+      if (redirectUrl) {
         const keyboard = {
           inline_keyboard: [
-            [{ text: '💳 Перейти к оплате', url: response.data.redirect }],
+            [{ text: '💳 Перейти к оплате', url: redirectUrl }],
             [{ text: '🔙 Назад в меню', callback_data: 'menu' }]
           ]
         };
-
-        dataStore.payments[transactionId] = {
-          chatId: chatId,
-          amount: 169,
-          currency: 'RUB', // Добавлено для верификации в вебхуке
-          status: 'pending',
-          created: Date.now()
-        };
-        saveData(dataStore);
 
         bot.sendMessage(chatId, '✅ Ссылка на оплату готова!\n\nНажмите кнопку ниже для перехода к оплате.', {
           reply_markup: keyboard
         });
       } else {
-        throw new Error('Не удалось получить ссылку на оплату');
+        // Если нет redirect — покажем админке и пользователю ошибку
+        await bot.sendMessage(chatId, '❌ Не удалось получить ссылку на оплату. Попробуйте позже или обратитесь в саппорт.');
+        await bot.sendMessage(ADMIN_ID, `⚠️ При создании платежа для ${chatId} не вернулась ссылка. Ответ Platega: ${JSON.stringify(response.data)}`);
       }
     } catch (error) {
       console.error('Ошибка создания платежа:', error.response?.data || error.message);
-      await bot.deleteMessage(chatId, loadingMsg.message_id).catch(() => {});
+      if (loadingMsg) await bot.deleteMessage(chatId, loadingMsg.message_id).catch(()=>{});
       bot.sendMessage(chatId, '❌ Произошла ошибка при создании платежа. Попробуйте позже или обратитесь в саппорт.');
+      await bot.sendMessage(ADMIN_ID, `Ошибка создания платежа для ${chatId}: ${error.response?.data || error.message}`);
     }
   } else if (data === 'support') {
     const message = `💬 *Саппорт*
@@ -258,6 +283,7 @@ bot.on('callback_query', async (query) => {
   }
 });
 
+/* --- Приём логина/пароля после успешного платежа --- */
 bot.on('message', async (msg) => {
   const chatId = msg.chat.id;
   const text = msg.text;
@@ -304,73 +330,163 @@ bot.on('message', async (msg) => {
   }
 });
 
+/* --- Вебхук от Platega --- */
+/*
+  Примечание по безопасности/форматам:
+  - Platega обычно шлёт заголовки X-MerchantId и X-Secret. Мы поддерживаем
+    варианты 'x-merchantid' и 'x-merchant-id' (все имена заголовков в Node.js
+    приходят в lowercase).
+  - Webhook'и могут приходить в нескольких форматах (top-level id/status или
+    вложенные transaction), поэтому обрабатываем несколько случаев.
+  - Если не удалось сопоставить webhook с локальной транзакцией — уведомляем админа.
+*/
 app.post('/webhook/platega', async (req, res) => {
   try {
-    console.log('Получен webhook от Platega:', JSON.stringify(req.body, null, 2));
-    console.log('Headers:', JSON.stringify(req.headers, null, 2));
+    // Быстрая проверка заголовков (учитываем разные варианты написания)
+    const headers = req.headers || {};
+    const merchantHeader = headers['x-merchantid'] || headers['x-merchant-id'] || headers['x-merchant'];
+    const secretHeader = headers['x-secret'] || headers['x-api-key'] || headers['x-secret-key'];
 
-    const merchantId = req.headers['x-merchantid'];
-    const secret = req.headers['x-secret'];
-
-    if (merchantId !== PLATEGA_SHOP_ID || secret !== PLATEGA_API_KEY) {
-      console.error('⛔ Неверная аутентификация webhook:', { merchantId, secret: secret ? '[HIDDEN]' : 'missing' });
+    if (!merchantHeader || !secretHeader || merchantHeader !== PLATEGA_SHOP_ID || secretHeader !== PLATEGA_API_KEY) {
+      console.error('⛔ Неверная аутентификация webhook:', { merchantHeader, secretHeader: secretHeader ? '[HIDDEN]' : 'missing' });
+      // Важно: если заголовки неверны — вернуть 401, чтобы знать, что пришёл невалидный запрос
       return res.status(401).json({ error: 'Unauthorized' });
     }
 
-    const { status, id, amount, currency } = req.body; // Добавлено извлечение amount и currency для верификации
+    // Валидация успешной доставки: обрабатываем возможные форматы тела
+    const body = req.body || {};
+    console.log('Получен webhook от Platega:', JSON.stringify(body, null, 2));
 
-    const payment = dataStore.payments[id];
-    if (!payment) {
-      console.error('⚠️ Транзакция не найдена:', id);
-      return res.status(200).json({ status: 'ok' });
+    // Вытащим статус и возможные id'шники (учитываем как top-level, так и вложенный transaction)
+    const status = (body.status || body.transaction?.status || '').toString().toUpperCase();
+    let txId = body.id || body.transaction?.id || body.transactionId || body.invoiceId || body.externalId || null;
+
+    // Найдём chatId: несколько способов
+    let chatId = null;
+
+    // 1) если у нас уже есть запись по txId
+    if (txId && dataStore.payments[txId]) {
+      chatId = dataStore.payments[txId].chatId;
     }
 
-    if (payment.amount !== amount || payment.currency !== currency) {
-      console.error('⚠️ Несоответствие суммы или валюты для транзакции:', id);
-      return res.status(200).json({ status: 'ok' });
-    }
-
-    if (status === 'CONFIRMED') {
-      const chatId = payment.chatId;
-
-      if (payment.status !== 'pending') {
-        console.log('⚠️ Транзакция уже обработана:', id);
-        return res.status(200).json({ status: 'ok' });
+    // 2) если есть payload (мы отправляли JSON.stringify({chatId}))
+    if (!chatId) {
+      const payloadRaw = body.payload || body.transaction?.payload || body.transaction?.externalId || null;
+      if (payloadRaw) {
+        try {
+          const parsed = (typeof payloadRaw === 'string') ? JSON.parse(payloadRaw) : payloadRaw;
+          if (parsed && parsed.chatId) {
+            chatId = parsed.chatId;
+            // Если txId отсутствует, попробуем найти локальную запись по chatId и pending статусу
+            if (!txId) {
+              for (const [k, v] of Object.entries(dataStore.payments)) {
+                if (v.chatId == chatId && v.status === 'pending') {
+                  txId = k;
+                  break;
+                }
+              }
+            }
+          }
+        } catch (e) {
+          // payload не JSON — пропускаем
+        }
       }
+    }
 
-      payment.status = 'paid';
-      payment.paidAt = Date.now();
-      saveData(dataStore);
+    // 3) запасной поиск по сумме и pending-записям
+    if (!chatId && body.paymentDetails?.amount != null) {
+      const amount = Number(body.paymentDetails.amount);
+      for (const [k, v] of Object.entries(dataStore.payments)) {
+        if (v.amount === amount && v.status === 'pending') {
+          chatId = v.chatId;
+          txId = k;
+          break;
+        }
+      }
+    }
 
-      bot.sendMessage(chatId, '✅ *Оплата прошла успешно!*\n\n📝 Теперь введите ваш логин от аккаунта Spotify:', {
-        parse_mode: 'Markdown'
-      });
+    // Если remote transaction id присутствует, попробуем маппинг: например, Platega может прислать remoteId
+    const remoteIdCandidate = body.transaction?.id || body.transactionId || body.id || body.invoiceId || body.externalId || null;
+    if (!txId && remoteIdCandidate && dataStore.payments[remoteIdCandidate]) {
+      txId = remoteIdCandidate;
+      chatId = dataStore.payments[txId].chatId;
+    }
 
-      userStates[chatId] = {
-        step: 'awaiting_login',
-        transactionId: id
-      };
-    } else if (['CANCELED', 'FAILED', 'EXPIRED'].includes(status)) { // Добавлена обработка дополнительных статусов неудачи
-      const chatId = payment.chatId;
+    // Если уже обработан — idempotency (на случай повторов)
+    if (txId && dataStore.payments[txId] && dataStore.payments[txId].status === 'paid' && status === 'CONFIRMED') {
+      console.log('Webhook duplicate CONFIRMED для', txId);
+      return res.status(200).json({ status: 'ok' });
+    }
 
-      payment.status = 'failed';
-      saveData(dataStore);
-
-      console.log(`Платеж ${status}:`, id);
-
+    // Основная логика по статусам
+    if (status === 'CONFIRMED') {
       if (chatId) {
-        bot.sendMessage(chatId, '❌ *Оплата не удалась!*\n\nПожалуйста, попробуйте снова или обратитесь в саппорт.', {
+        // обновляем статус и сохраняем
+        const storeKey = txId || `tx_unknown_${Date.now()}`;
+        dataStore.payments[storeKey] = dataStore.payments[storeKey] || {};
+        dataStore.payments[storeKey].chatId = chatId;
+        dataStore.payments[storeKey].status = 'paid';
+        dataStore.payments[storeKey].paidAt = Date.now();
+        saveData(dataStore);
+
+        // спросим логин у пользователя
+        await bot.sendMessage(chatId, '✅ *Оплата прошла успешно!*\n\n📝 Теперь введите ваш логин от аккаунта Spotify:', {
           parse_mode: 'Markdown'
         });
-      }
-    } else {
-      console.log(`Неизвестный статус ${status} для транзакции:`, id);
-    }
 
-    res.status(200).json({ status: 'ok' });
+        userStates[chatId] = {
+          step: 'awaiting_login',
+          transactionId: storeKey
+        };
+
+        // вернуть 200 — Platega подтвердит доставку
+        return res.status(200).json({ status: 'ok' });
+      } else {
+        // Не нашли соответствие — уведомляем админа и сохраняем необработанный webhook
+        await bot.sendMessage(ADMIN_ID, `⚠️ Получен webhook CONFIRMED, но не удалось найти chatId для транзакции.\nbody: \`${JSON.stringify(body)}\``, { parse_mode: 'Markdown' });
+        console.error('CONFIRMED, но chatId не найден. Сохраняю для ручной проверки.');
+        // Сохраняем "непривязанную" запись
+        const unkKey = `unmapped_${Date.now()}`;
+        dataStore.payments[unkKey] = { status: 'confirmed_unmapped', raw: body, created: Date.now() };
+        saveData(dataStore);
+        return res.status(200).json({ status: 'ok' });
+      }
+    } else if (status === 'CANCELED' || status === 'EXPIRED' || status === 'FAILED') {
+      if (chatId && txId) {
+        dataStore.payments[txId] = dataStore.payments[txId] || {};
+        dataStore.payments[txId].status = status.toLowerCase();
+        dataStore.payments[txId].updatedAt = Date.now();
+        saveData(dataStore);
+
+        await bot.sendMessage(chatId, `❌ Статус платежа: *${status}*. Платёж не был завершён. Попробуйте ещё раз или обратитесь в саппорт.`, {
+          parse_mode: 'Markdown'
+        });
+      } else {
+        await bot.sendMessage(ADMIN_ID, `⚠️ Получен webhook ${status}, но не найден связанный chatId. body: \`${JSON.stringify(body)}\``, { parse_mode: 'Markdown' });
+        const unkKey = `unmapped_${Date.now()}`;
+        dataStore.payments[unkKey] = { status: status.toLowerCase(), raw: body, created: Date.now() };
+        saveData(dataStore);
+      }
+      return res.status(200).json({ status: 'ok' });
+    } else {
+      // другие статусы (например PENDING) — просто логируем и сохраняем при возможности
+      console.log('Получен webhook со статусом:', status);
+      if (txId) {
+        dataStore.payments[txId] = dataStore.payments[txId] || {};
+        dataStore.payments[txId].status = (status || dataStore.payments[txId].status || 'pending').toLowerCase();
+        saveData(dataStore);
+      } else {
+        const unkKey = `unmapped_${Date.now()}`;
+        dataStore.payments[unkKey] = { status: status || 'unknown', raw: body, created: Date.now() };
+        saveData(dataStore);
+      }
+      return res.status(200).json({ status: 'ok' });
+    }
   } catch (error) {
     console.error('Ошибка обработки webhook:', error);
-    res.status(200).json({ status: 'ok' });
+    // лучше вернуть 200, чтобы Platega не считала ошибку на нашей стороне (но логируем администратору)
+    await bot.sendMessage(ADMIN_ID, `Ошибка при обработке webhook Platega: ${error.message}`);
+    return res.status(200).json({ status: 'ok' });
   }
 });
 
