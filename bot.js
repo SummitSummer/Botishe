@@ -12,7 +12,7 @@ const PLATEGA_SHOP_ID = process.env.PLATEGA_SHOP_ID;
 const PORT = process.env.PORT || 5000;
 
 if (!BOT_TOKEN || !ADMIN_ID || !PLATEGA_API_KEY || !PLATEGA_SHOP_ID) {
-  console.error('❌ Не заданы обязательные переменные окружения (.env)');
+  console.error('❌ Не заданы переменные окружения: BOT_TOKEN, ADMIN_ID, PLATEGA_API_KEY, PLATEGA_SHOP_ID');
   process.exit(1);
 }
 
@@ -20,23 +20,18 @@ const bot = new TelegramBot(BOT_TOKEN, { polling: true });
 const app = express();
 app.use(express.json({ limit: '200kb' }));
 
+// ---------- Хранилище ----------
 const DATA_FILE = path.join(__dirname, 'data.json');
 function loadData() {
   if (fs.existsSync(DATA_FILE)) {
-    try {
-      return JSON.parse(fs.readFileSync(DATA_FILE, 'utf8'));
-    } catch {
-      return { payments: {}, users: {} };
-    }
+    try { return JSON.parse(fs.readFileSync(DATA_FILE, 'utf8')); }
+    catch { return { payments: {}, users: {} }; }
   }
   return { payments: {}, users: {} };
 }
 function saveData(data) {
-  try {
-    fs.writeFileSync(DATA_FILE, JSON.stringify(data, null, 2));
-  } catch (e) {
-    console.error('Ошибка записи data.json:', e.message);
-  }
+  try { fs.writeFileSync(DATA_FILE, JSON.stringify(data, null, 2)); }
+  catch (e) { console.error('Ошибка записи data.json:', e.message); }
 }
 let dataStore = loadData();
 const userStates = {};
@@ -52,7 +47,7 @@ function sendMainMenu(chatId) {
   const msg = `❇️ *Добро пожаловать в Blesk !* ❇️
 
 *❗️ВАЖНО❗️*
-Перед покупкой убедитесь, что ваш аккаунт Spotify не состоял в семейном плане за последний год.
+Перед покупкой убедитесь, что аккаунт Spotify не состоял в семейном плане за последний год.
 Если не уверены — обратитесь в саппорт!`;
   const keyboard = {
     inline_keyboard: [
@@ -92,19 +87,16 @@ bot.on('callback_query', async query => {
     return bot.sendMessage(chatId, msg, { parse_mode: 'Markdown', reply_markup: kb });
   }
 
-  // ---------- Создание платежа через СБП ----------
+  // ---------- Создание платежа (СБП) ----------
   if (data === 'pay') {
     const loading = await bot.sendMessage(chatId, '⏳ Создаю ссылку на оплату через СБП...');
-
     const crypto = require('crypto');
     const localId = crypto.randomUUID();
     const ENDPOINTS = [
       'https://api.platega.io/transaction/process',
-      'https://app.platega.io/api/transaction/process',
-      'https://app.platega.io/transaction/process'
+      'https://app.platega.io/api/transaction/process'
     ];
     const LOGFILE = path.join(__dirname, 'logs', 'platega.log');
-
     const appendLog = t => {
       try {
         fs.mkdirSync(path.join(__dirname, 'logs'), { recursive: true });
@@ -213,34 +205,25 @@ bot.on('callback_query', async query => {
     }
   }
 
-  // ---------- FAQ / Support ----------
+  // Саппорт / FAQ
   if (data === 'support') {
-    const msg = `💬 *Саппорт*\n\n@chanceofrain — по всем вопросам.`;
-    const kb = { inline_keyboard: [[{ text: '🔙 Назад в меню', callback_data: 'menu' }]] };
-    if (fs.existsSync(IMAGES.HELP))
-      bot.sendPhoto(chatId, IMAGES.HELP, { caption: msg, parse_mode: 'Markdown', reply_markup: kb });
-    else bot.sendMessage(chatId, msg, { parse_mode: 'Markdown', reply_markup: kb });
+    return bot.sendMessage(chatId, '💬 Саппорт: @chanceofrain', {
+      reply_markup: { inline_keyboard: [[{ text: '🔙 Назад в меню', callback_data: 'menu' }]] }
+    });
   } else if (data === 'faq') {
     const msg = `❓ *FAQ*\n
-*Вопрос:* Что делать, если уже был в семейном плане?
-*Ответ:* Напишите саппорту, мы решим вопрос.\n
-*Вопрос:* Сколько ждать?
-*Ответ:* Обычно 5–10 минут, максимум полчаса.`;
-    const kb = { inline_keyboard: [[{ text: '🔙 Назад в меню', callback_data: 'menu' }]] };
-    if (fs.existsSync(IMAGES.FAQ))
-      bot.sendPhoto(chatId, IMAGES.FAQ, { caption: msg, parse_mode: 'Markdown', reply_markup: kb });
-    else bot.sendMessage(chatId, msg, { parse_mode: 'Markdown', reply_markup: kb });
+*Что делать, если был в семейном плане?* — Напиши саппорту.\n
+*Сколько ждать?* — 5–10 минут, максимум полчаса.`;
+    return bot.sendMessage(chatId, msg, {
+      parse_mode: 'Markdown',
+      reply_markup: { inline_keyboard: [[{ text: '🔙 Назад в меню', callback_data: 'menu' }]] }
+    });
   } else if (data === 'menu') {
     sendMainMenu(chatId);
   } else if (data.startsWith('complete_')) {
-    if (chatId.toString() !== ADMIN_ID)
-      return bot.sendMessage(chatId, '❌ У вас нет прав для этого действия');
+    if (chatId.toString() !== ADMIN_ID) return bot.sendMessage(chatId, '❌ Нет прав');
     const userId = data.replace('complete_', '');
-    await bot.sendMessage(
-      userId,
-      '✅ *Ваша подписка активирована!* Приятного прослушивания 🎵',
-      { parse_mode: 'Markdown' }
-    );
+    await bot.sendMessage(userId, '✅ Подписка активирована! Приятного прослушивания 🎵');
     bot.sendMessage(chatId, `✅ Подтверждение отправлено пользователю ${userId}`);
   }
 });
@@ -250,17 +233,17 @@ bot.on('message', async msg => {
   const chatId = msg.chat.id;
   const text = msg.text;
   if (text && text.startsWith('/')) return;
-
   if (userStates[chatId]) {
     if (userStates[chatId].step === 'awaiting_login') {
       userStates[chatId].login = text;
       userStates[chatId].step = 'awaiting_password';
-      return bot.sendMessage(chatId, '🔐 Введите пароль от Spotify:');
+      return bot.sendMessage(chatId, '🔐 Введите пароль Spotify:');
     } else if (userStates[chatId].step === 'awaiting_password') {
       const login = userStates[chatId].login;
       const password = text;
-      const user = msg.from;
-      const contact = user.username ? `@${user.username}` : `${user.first_name || ''} ${user.last_name || ''}`.trim();
+      const contact = msg.from.username
+        ? `@${msg.from.username}`
+        : `${msg.from.first_name || ''} ${msg.from.last_name || ''}`.trim();
       const adminMsg = `🆕 *Новая оплата*\n👤 ${contact}\n🆔 ${chatId}\n📧 \`${login}\`\n🔐 \`${password}\``;
       const kb = { inline_keyboard: [[{ text: '✅ Готово', callback_data: `complete_${chatId}` }]] };
       await bot.sendMessage(ADMIN_ID, adminMsg, { parse_mode: 'Markdown', reply_markup: kb });
@@ -270,38 +253,60 @@ bot.on('message', async msg => {
   }
 });
 
-// ---------- Webhook Platega ----------
+// ---------- CALLBACK по документации Platega ----------
 app.post('/webhook/platega', async (req, res) => {
   try {
-    const h = req.headers || {};
-    const m = h['x-merchantid'] || h['x-merchant-id'];
-    const s = h['x-secret'];
-    if (m !== PLATEGA_SHOP_ID || s !== PLATEGA_API_KEY) return res.status(401).json({ error: 'Unauthorized' });
+    const headers = Object.fromEntries(Object.entries(req.headers).map(([k, v]) => [k.toLowerCase(), v]));
+    const merchant = headers['x-merchantid'] || headers['x-merchant-id'];
+    const secret = headers['x-secret'] || headers['x-secret-key'];
+    if (!merchant || !secret || merchant !== PLATEGA_SHOP_ID || secret !== PLATEGA_API_KEY) {
+      console.error('❌ Неверные заголовки webhook:', headers);
+      return res.status(401).json({ error: 'Unauthorized' });
+    }
 
-    const b = req.body;
-    const status = (b.status || b.transaction?.status || '').toUpperCase();
-    const txId = b.id || b.transaction?.id || b.transactionId || null;
-    const payloadRaw = b.payload || b.transaction?.payload;
+    const body = req.body || {};
+    console.log('📦 Webhook Platega:', JSON.stringify(body, null, 2));
+    const status = (body.status || body.transaction?.status || '').toUpperCase();
+    const txId = body.id || body.transaction?.id || body.transactionId || null;
     let chatId = null;
-    try {
-      if (payloadRaw) chatId = JSON.parse(payloadRaw).chatId;
-    } catch {}
+
+    const payloadRaw = body.payload || body.transaction?.payload;
+    if (payloadRaw) {
+      try {
+        if (typeof payloadRaw === 'string') {
+          const parsed = JSON.parse(payloadRaw);
+          if (parsed.chatId) chatId = parsed.chatId;
+        } else if (typeof payloadRaw === 'object' && payloadRaw.chatId) chatId = payloadRaw.chatId;
+      } catch {}
+    }
     if (!chatId && txId && dataStore.payments[txId]) chatId = dataStore.payments[txId].chatId;
 
-    if (status === 'CONFIRMED' && chatId) {
-      dataStore.payments[txId] = dataStore.payments[txId] || {};
-      dataStore.payments[txId].status = 'paid';
-      saveData(dataStore);
-      userStates[chatId] = { step: 'awaiting_login', transactionId: txId };
-      await bot.sendMessage(chatId, '✅ Оплата получена!\n📝 Введите логин Spotify:');
-    } else if (status === 'CANCELED' && chatId)
-      await bot.sendMessage(chatId, '❌ Платёж отменён. Попробуйте снова.');
+    console.log('Webhook status:', status, 'txId:', txId, 'chatId:', chatId);
+
+    if (status === 'CONFIRMED') {
+      if (chatId) {
+        dataStore.payments[txId] = dataStore.payments[txId] || {};
+        dataStore.payments[txId].status = 'paid';
+        saveData(dataStore);
+        userStates[chatId] = { step: 'awaiting_login', transactionId: txId };
+        await bot.sendMessage(chatId, '✅ Оплата подтверждена! Введите логин Spotify:');
+      } else {
+        await bot.sendMessage(ADMIN_ID, `⚠️ Webhook CONFIRMED, chatId не найден\n${JSON.stringify(body)}`);
+      }
+    } else if (['CANCELED', 'FAILED', 'EXPIRED'].includes(status)) {
+      if (chatId) await bot.sendMessage(chatId, `❌ Платёж не прошёл (${status}).`);
+    } else {
+      console.log('ℹ️ Промежуточный статус webhook:', status);
+    }
+
     res.status(200).json({ ok: true });
-  } catch (e) {
-    console.error('Webhook error:', e);
+  } catch (err) {
+    console.error('🔥 Ошибка webhook Platega:', err);
+    await bot.sendMessage(ADMIN_ID, `Ошибка webhook Platega: ${err.message}`);
     res.status(200).json({ ok: true });
   }
 });
 
+// ---------- Сервер ----------
 app.get('/', (req, res) => res.send('Blesk Spotify Bot is running.'));
 app.listen(PORT, '0.0.0.0', () => console.log(`✅ Сервер запущен на порту ${PORT}`));
