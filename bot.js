@@ -118,7 +118,7 @@ bot.on('callback_query', async (query) => {
     });
   } else if (data === 'pay') {
     try {
-      bot.sendMessage(chatId, '⏳ Создаю ссылку на оплату...');
+      const loadingMsg = await bot.sendMessage(chatId, '⏳ Создаю ссылку на оплату...');
 
       const crypto = require('crypto');
       const transactionId = crypto.randomUUID();
@@ -145,6 +145,8 @@ bot.on('callback_query', async (query) => {
       });
 
       if (response.data && response.data.redirect) {
+        await bot.deleteMessage(chatId, loadingMsg.message_id).catch(() => {});
+
         const keyboard = {
           inline_keyboard: [
             [{ text: '💳 Перейти к оплате', url: response.data.redirect }],
@@ -168,6 +170,7 @@ bot.on('callback_query', async (query) => {
       }
     } catch (error) {
       console.error('Ошибка создания платежа:', error.response?.data || error.message);
+      await bot.deleteMessage(chatId, loadingMsg.message_id).catch(() => {});
       bot.sendMessage(chatId, '❌ Произошла ошибка при создании платежа. Попробуйте позже или обратитесь в саппорт.');
     }
   } else if (data === 'support') {
