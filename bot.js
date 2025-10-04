@@ -130,13 +130,14 @@ bot.on('callback_query', async (query) => {
           amount: 169,
           currency: 'RUB'
         },
+        merchantId: PLATEGA_SHOP_ID, // Добавлено для соответствия примеру документации
         description: 'Подписка Spotify - 1 месяц',
         return: 'https://t.me/blesk_spotify_bot',
         failedUrl: 'https://t.me/blesk_spotify_bot',
         payload: JSON.stringify({ chatId: chatId })
       };
 
-      const response = await axios.post('https://app.platega.io/transaction/process', paymentData, {
+      const response = await axios.post('https://api.platega.io/transaction/process', paymentData, { // Изменен базовый URL на api.platega.io в соответствии с документацией
         headers: {
           'X-MerchantId': PLATEGA_SHOP_ID,
           'X-Secret': PLATEGA_API_KEY,
@@ -157,6 +158,7 @@ bot.on('callback_query', async (query) => {
         dataStore.payments[transactionId] = {
           chatId: chatId,
           amount: 169,
+          currency: 'RUB', // Добавлено для верификации в вебхуке
           status: 'pending',
           created: Date.now()
         };
@@ -315,33 +317,54 @@ app.post('/webhook/platega', async (req, res) => {
       return res.status(401).json({ error: 'Unauthorized' });
     }
 
-    const { status, id } = req.body;
+    const { status, id, amount, currency } = req.body; // Добавлено извлечение amount и currency для верификации
+
+    const payment = dataStore.payments[id];
+    if (!payment) {
+      console.error('⚠️ Транзакция не найдена:', id);
+      return res.status(200).json({ status: 'ok' });
+    }
+
+    if (payment.amount !== amount || payment.currency !== currency) {
+      console.error('⚠️ Несоответствие суммы или валюты для транзакции:', id);
+      return res.status(200).json({ status: 'ok' });
+    }
 
     if (status === 'CONFIRMED') {
-      let chatId;
+      const chatId = payment.chatId;
 
-      if (dataStore.payments[id]) {
-        chatId = dataStore.payments[id].chatId;
+      if (payment.status !== 'pending') {
+        console.log('⚠️ Транзакция уже обработана:', id);
+        return res.status(200).json({ status: 'ok' });
       }
+
+      payment.status = 'paid';
+      payment.paidAt = Date.now();
+      saveData(dataStore);
+
+      bot.sendMessage(chatId, '✅ *Оплата прошла успешно!*\n\n📝 Теперь введите ваш логин от аккаунта Spotify:', {
+        parse_mode: 'Markdown'
+      });
+
+      userStates[chatId] = {
+        step: 'awaiting_login',
+        transactionId: id
+      };
+    } else if (['CANCELED', 'FAILED', 'EXPIRED'].includes(status)) { // Добавлена обработка дополнительных статусов неудачи
+      const chatId = payment.chatId;
+
+      payment.status = 'failed';
+      saveData(dataStore);
+
+      console.log(`Платеж ${status}:`, id);
 
       if (chatId) {
-        dataStore.payments[id].status = 'paid';
-        dataStore.payments[id].paidAt = Date.now();
-        saveData(dataStore);
-
-        bot.sendMessage(chatId, '✅ *Оплата прошла успешно!*\n\n📝 Теперь введите ваш логин от аккаунта Spotify:', {
+        bot.sendMessage(chatId, '❌ *Оплата не удалась!*\n\nПожалуйста, попробуйте снова или обратитесь в саппорт.', {
           parse_mode: 'Markdown'
         });
-
-        userStates[chatId] = {
-          step: 'awaiting_login',
-          transactionId: id
-        };
-      } else {
-        console.error('⚠️ Не найден chatId для транзакции:', id);
       }
-    } else if (status === 'CANCELED') {
-      console.log('Платеж отменен:', id);
+    } else {
+      console.log(`Неизвестный статус ${status} для транзакции:`, id);
     }
 
     res.status(200).json({ status: 'ok' });
