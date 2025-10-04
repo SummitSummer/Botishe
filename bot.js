@@ -125,7 +125,7 @@ bot.on('callback_query', async (query) => {
       
       const paymentData = {
         id: transactionId,
-        paymentMethod: 10,
+        paymentMethod: 2,
         paymentDetails: {
           amount: 169,
           currency: 'RUB'
